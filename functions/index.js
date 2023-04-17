@@ -1,70 +1,105 @@
-const express = require("express");
-const tf = require("@tensorflow/tfjs-node");
-const multer = require("multer");
-const fs = require("fs");
+const express = require('express');
+const tf = require('@tensorflow/tfjs-node');
+const axios = require('axios');
 const path = require('path');
-const functions = require("firebase-functions");
-const axios = require("axios");
+const functions = require('firebase-functions');
+
 
 const app = express();
-const port = 5000;
-
 app.use(express.json());
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  next();
-});
 
-const TARGET_CLASSES = {
-  0: 'Actinic Keratoses (Solar Keratoses) or intraepithelial Carcinoma (Bowen’s disease)',
-  1: 'Basal Cell Carcinoma',
-  2: 'Benign Keratosis',
-  3: 'Dermatofibroma',
-  4: 'Melanoma',
-  5: 'Melanocytic Nevi',
-  6: 'Vascular skin lesion'
+const port = 3000;
+const MODEL_PATH = {
+  skin: path.join(__dirname, 'skin-model', 'skin-model.json'),
+  invasive: path.join(__dirname, 'invasive-model', 'invasive-model.json'),
+  meta: path.join(__dirname, 'meta-model', 'meta-model.json'),
+};
+const CLASSES = {
+  skin: {
+    0: 'Actinic Keratoses (Solar Keratoses) or intraepithelial Carcinoma (Bowen’s disease)',
+    1: 'Basal Cell Carcinoma',
+    2: 'Benign Keratosis',
+    3: 'Dermatofibroma',
+    4: 'Melanoma',
+    5: 'Melanocytic Nevi',
+    6: 'Vascular skin lesion',
+  },
+  invasive: {
+    0: 'Normal',
+    1: 'Invasive Ductal Carcinoma'
+  },
+  meta: {
+    0: 'Normal',
+    1: 'Metastatic Tissue',
+  }
+};
+const scalarOffset = {
+  skin: 127.5,
+  invasive: 255.0,
+  meta: 255.0
+}
+const imageSize = {
+  skin: [224, 224],
+  invasive: [50, 50],
+  meta: [96, 96],
 };
 
-const loadModel = async () => {
-  const modelPath = path.join(__dirname, 'model', 'model.json');
-  const model = await tf.loadLayersModel(`file://${modelPath}`);
-  return model;
-};
-
-const preprocessImage = (imageBuffer) => {
-  const tensor = tf.node.decodeImage(imageBuffer);
-  const resized = tf.image.resizeNearestNeighbor(tensor, [224, 224]);
-  const casted = resized.cast("float32");
+const preprocessImage = (imageBuffer, modelType) => {
+  const imageTensor = tf.node.decodeImage(imageBuffer);
+  const size = imageSize[modelType];
+  const resized = tf.image.resizeNearestNeighbor(imageTensor, size);
+  const casted = resized.cast('float32');
   const expanded = casted.expandDims();
-  const offset = tf.scalar(127.5);
+  const offset = scalarOffset[modelType];
   return expanded.sub(offset).div(offset);
 };
 
-app.post('/predict', async (req, res) => {
+const predict = async (imageUrl, modelType) => {
   try {
-    const imageUrl = req.body.url;
-    const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
-    const tensor = preprocessImage(response.data);
-    const model = await loadModel();
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    const tensor = preprocessImage(response.data, modelType);
+    const model = await tf.loadLayersModel(`file://${MODEL_PATH[modelType]}`);
     const predictions = await model.predict(tensor).data();
-    const top5 = Array.from(predictions)
-      .map((p, i) => ({
-        probability: p,
-        className: TARGET_CLASSES[i],
-      }))
+    const classes = CLASSES[modelType];
+    const topPredictions = Array.from(predictions)
+      .map((probability, i) => ({ probability, className: classes[i] }))
       .sort((a, b) => b.probability - a.probability)
-      .slice(0, 5);
-    console.log(top5);
-    res.json(top5);
+      .slice(0, modelType === 'skin' ? 5 : 2);
+
+    const fixed = modelType === "skin" ? 3 : 6
+
+    topPredictions.forEach(function (p) {
+      `${p.className}: ${p.probability.toFixed(fixed)}`;
+    })
+
+    return topPredictions;
+  }
+  catch (error) {
+    console.error(error);
+    throw new Error(`Error predicting image: ${error.message}`);
+  }
+};
+
+app.post('/predict/:modelType', async (req, res) => {
+  const { modelType } = req.params;
+
+  if (!['skin', 'invasive', 'meta'].includes(modelType)) {
+    return res.status(400).send('Invalid model type');
+  }
+  const { url } = req.body;
+  if (!url) {
+    return res.status(400).send('Missing image URL');
+  }
+  try {
+    const topPredictions = await predict(url, modelType);
+    res.json(topPredictions);
   } catch (err) {
     console.error(err);
     res.status(500).send('Internal Server Error');
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server started on port ${port}`);
-});
+// app.listen(port, () => {
+//     console.log(`Server started on port ${port}`);
+// });
 exports.app = functions.https.onRequest(app);
