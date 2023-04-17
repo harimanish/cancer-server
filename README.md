@@ -1,4 +1,4 @@
-# cancer-server
+# cancer-web_client
 
 ## Overview
 This project is a web application that uses a Convolutional Neural Network (CNN) model to classify skin cancer images into 6 types. The application allows users to upload an image and get the result of the classification. The backend of the application is built using Node.js and Express.js. Firebase Storage is used to store the images uploaded by users. The cloud function is deployed on Google Cloud Functions.
